@@ -1,0 +1,32 @@
+# Alphabot Project - Day 1 Evaluation
+Date: June 3, 2026
+Status: Functional Prototype (High-Level Reasoning Stage)
+
+## Executive Summary
+Day 1 focused on building a real-time stream-parsing chatbot capable of translating natural language into high-performance, indexed SQL queries. While basic data retrieval works, higher-level mathematical reasoning and entity resolution (identifying which word belongs to which column) proved to be significant challenges.
+
+## Work Completed
+- Full-stack environment: Next.js (TS) frontend + FastAPI (Python) backend.
+- Mock database: 250,000 transaction rows with indexed fields.
+- Real-time client-side tokenizer: Tokenizes on spacebar and builds a "Query Blueprint".
+- Dynamic Visualization: Implemented Bar, Line, and Donut charts (later simplified to text-based for stability).
+- AI Fallback: Integrated local Ollama LLM (llama3.2) to handle ambiguous queries.
+- Advanced Logic: Implemented benchmarking for comparisons ("just greater than") and gap analysis ("ahead by").
+
+## Challenges & Failures (Trial and Error)
+1. **The "Whole-Table Leak" Bug:** When the system fails to identify a department (e.g., "marketing"), it often defaults to summing the entire database, leading to misleadingly large numbers.
+2. **AI Hallucinations:** The LLM consistently attempts to use non-existent columns (like `department_name` or `year`) or complex objects where strings are expected, breaking the strict backend data models.
+3. **Implicit vs. Explicit Aggregation:** Initially, the bot returned raw records. Business users expect aggregated totals (SUM/AVG). Switching the default behavior improved UX but introduced new logical branches.
+4. **Temporal Confusion:** Handling "2026" as a year (calendar) vs. "FY2026" (fiscal) required complex SQL `strftime` logic that was difficult to generalize.
+5. **State Syncing:** Client-side word grouping (e.g., "digital dept") frequently got out of sync with backend expected values.
+
+## Key Insights for "Alphabot"
+- **Metadata is King:** The AI needs a much clearer map of the *values* inside the database (not just the columns) to stop guessing.
+- **Atomic Reasoning:** Comparative queries ("just greater than") cannot be handled in a single SQL statement; they require a "Benchmark -> Filter -> Sort -> Limit" pipeline.
+- **Fail-Fast UI:** If the bot doesn't find an entity, it should ask the user to clarify rather than returning a sum of the entire company's data.
+- **JSON is the Bottleneck:** While structured, the JSON blueprint is the most frequent point of failure. Future versions should focus on a "Correction Loop" between the backend and the AI.
+
+## Plan for Day 2
+- Implement "Entity Verification": Query the DB for distinct values and provide them to the AI as a fixed vocabulary.
+- Build a "Clarification UI": If the blueprint is missing a filter, the bot should ask: "Which department did you mean?"
+- Re-introduce stable charting using a more rigid data-to-chart mapping.
