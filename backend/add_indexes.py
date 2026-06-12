@@ -24,8 +24,13 @@ def add_indexes_to_db(db_path):
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_region ON {table_name}(region)")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_record_date ON {table_name}(record_date)")
         
-        # Also create a composite index for breakdown queries
+        # Also create composite and expression indexes for optimal search performance
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_dept_region ON {table_name}(department, region)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_dept_date ON {table_name}(department, record_date)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_region_date ON {table_name}(region, record_date)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_expr_year ON {table_name}(strftime('%Y', record_date))")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_expr_month ON {table_name}(strftime('%Y-%m', record_date))")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_expr_date ON {table_name}(DATE(record_date))")
         
         conn.commit()
         print(f"  Success!")

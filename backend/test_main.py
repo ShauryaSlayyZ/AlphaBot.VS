@@ -67,7 +67,7 @@ def test_total_revenue_query(mock_run_query, client):
     data = response.json()
     assert response.status_code == 200
     assert data["status"] == "success"
-    assert data["results"][0]["revenue"] == 8000
+    assert data["results"][0]["revenue"] == 1000 * len(POWER_PLANTS)
 
 @patch('main.run_query_on_single_db')
 def test_filtered_headcount_query(mock_run_query, client):
@@ -80,7 +80,7 @@ def test_filtered_headcount_query(mock_run_query, client):
     data = response.json()
     assert response.status_code == 200
     assert data["status"] == "success"
-    assert data["results"][0]["headcount"] == 80
+    assert data["results"][0]["headcount"] == 10 * len(POWER_PLANTS)
 
 @patch('main.run_query_on_single_db')
 def test_multi_metric_breakdown_query(mock_run_query, client):
@@ -91,10 +91,10 @@ def test_multi_metric_breakdown_query(mock_run_query, client):
         "marketing_spend": 45036.81, "customer_count": 2885
     }]
     payload = {
-        "raw_query": "what is the breakdown of sales department in 2026-08-13 19:00:00 of grand_gulf in south region",
+        "raw_query": "what is the breakdown of revenue, profit, expenses, headcount, salary, customer count in sales department in 2026-08-13 19:00:00 of grand_gulf in south region",
         "blueprint": {
             "operation": "BREAKDOWN",
-            "metrics": [],  # Trigger default
+            "metrics": ["revenue", "profit", "expenses", "headcount", "salary", "customer_count"],
             "filters": [
                 {"column": "department", "value": "sales"},
                 {"column": "plant", "value": "grand_gulf"},
@@ -120,3 +120,18 @@ def test_health_check(client):
     response = client.get("/")
     assert response.status_code == 200
     assert response.json() == {"status": "online"}
+
+def test_deterministic_parser_word_boundaries_and_top_n():
+    from main import parse_query_deterministically
+    
+    # 1. Word boundary check ('through' should not match 'hr')
+    res_through = parse_query_deterministically("marketing spend breakdown by department at palo verde from 2022 through 2026")
+    assert res_through is not None
+    filters = res_through["blueprint"].filters
+    depts = [f["value"] for f in filters if f["column"] == "department"]
+    assert "hr" not in depts
+    
+    # 2. top_n subject rank check ('top plants' should have 'plant' as comparison dimension)
+    res_top = parse_query_deterministically("top plants by profit in sales department from 2023 to 2026")
+    assert res_top is not None
+    assert res_top["blueprint"].comparison == {"type": "plant"}
