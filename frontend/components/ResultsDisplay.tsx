@@ -2,12 +2,18 @@ import { useRef } from 'react';
 import { DataChart } from './DataChart';
 
 const KNOWN_METRICS = [
+  'capacity_mw',
+  'budget_allocated',
+  'budget_used',
+  'budget_remaining',
+  'revenue',
+  'completion_percentage',
+  'delay_days',
   'operating_cost',
   'marketing_spend',
   'tax_liability',
   'asset_value',
   'customer_count',
-  'revenue',
   'profit',
   'expenses',
   'headcount',
@@ -99,8 +105,20 @@ export function ResultsDisplay({ data, devMode, onFollowUpClick, darkMode }: Res
 
   const formatMetricValue = (val: any, metricName: string) => {
     if (val == null) return "0";
-    const isCurrency = !['headcount', 'customer_count', 'customers', 'employees', 'people'].includes(metricName.toLowerCase().replace(/_/g, ' '));
-    const prefix = isCurrency ? "$" : "";
+    const k = metricName.toLowerCase().replace(/_/g, ' ');
+    if (k.includes('capacity')) {
+      return `${val.toLocaleString()} MW`;
+    }
+    if (k.includes('percent') || k.includes('pct')) {
+      return `${val.toLocaleString()}%`;
+    }
+    if (k.includes('delay') || k.includes('days')) {
+      return `${val.toLocaleString()} Days`;
+    }
+    if (['headcount', 'customer_count', 'customers', 'employees', 'people'].some(keyword => k.includes(keyword))) {
+      return val.toLocaleString();
+    }
+    const prefix = "$";
     if (val >= 1000000) return `${prefix}${(val / 1000000).toFixed(1)}M`;
     if (val >= 1000) return `${prefix}${(val / 1000).toFixed(1)}K`;
     return prefix + val.toLocaleString();
@@ -169,92 +187,191 @@ export function ResultsDisplay({ data, devMode, onFollowUpClick, darkMode }: Res
     const cleanM = m.replace(/_/g, ' ');
     const capM = cleanM.charAt(0).toUpperCase() + cleanM.slice(1);
     
-    // Extract active filters from SQL query
+    // Extract active filters from SQL query or results
     const sqlLower = (sql_query || '').toLowerCase();
-    const depts = ["sales", "digital", "marketing", "hr", "engineering", "finance", "support", "operations"];
-    const regions = ["north", "south", "east", "west", "central"];
+    const depts = ["solar", "wind", "hybrid", "hybrid-solar", "hybrid-wind", "sales", "digital", "marketing", "hr", "engineering", "finance", "support", "operations"];
+    const regions = ["gujarat", "karnataka", "maharashtra", "rajasthan", "tamil nadu", "north", "south", "east", "west", "central"];
     const plants = ["diablo_canyon", "three_mile_island", "palo_verde", "grand_gulf", "vogtle", "hinkley_point", "kashiwazaki", "darlington"];
     
-    const activeDept = depts.find(d => sqlLower.includes(`'${d}'`));
-    const activeRegion = regions.find(r => sqlLower.includes(`'${r}'`));
-    const activePlant = plants.find(p => sqlLower.includes(p));
+    const activeDept = depts.find(d => sqlLower.includes(`'${d}'`) || sqlLower.includes(`'${d.toLowerCase()}'`));
+    const activeRegion = regions.find(r => sqlLower.includes(`'${r}'`) || sqlLower.includes(`'${r.toLowerCase()}'`));
+    
+    let activePlant = plants.find(p => sqlLower.includes(p));
+    if (!activePlant && results.length > 0) {
+      for (const row of results) {
+        if (row.plant) {
+          activePlant = plants.find(p => p === row.plant.toLowerCase() || p.replace('_', ' ') === row.plant.toLowerCase());
+          if (activePlant) break;
+        }
+      }
+    }
+    
+    const yearMatch = sqlLower.match(/\b(202[0-7])\b/);
+    const activeYear = yearMatch ? yearMatch[1] : null;
+    const timeLabel = activeYear ? `in ${activeYear}` : "";
     
     // Format helpers
-    const formatDept = (d: string) => d === "hr" || d === "digital" ? d.toUpperCase() : d.charAt(0).toUpperCase() + d.slice(1);
-    const formatRegion = (r: string) => r.charAt(0).toUpperCase() + r.slice(1);
+    const formatDept = (d: string) => {
+      if (d === "hr" || d === "digital") return d.toUpperCase();
+      return d.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('-');
+    };
+    const formatRegion = (r: string) => r.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     const formatPlant = (p: string) => p.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    
+    const deptLabel = activeDept ? formatDept(activeDept) : "";
+    const regionLabel = activeRegion ? formatRegion(activeRegion) : "";
+    const plantLabel = activePlant ? formatPlant(activePlant) : "";
     
     const questions = [];
     
-    if (activeDept) {
-      const dLabel = formatDept(activeDept);
-      questions.push(`Compare ${dLabel} and Sales ${capM}`);
-      questions.push(`${dLabel} ${capM} Trend`);
-      questions.push(`${dLabel} ${capM} by Region`);
-      questions.push(`${dLabel} ${capM} by Plant`);
-      questions.push(`Top 3 Plants by ${dLabel} ${capM}`);
-    } else if (activeRegion) {
-      const rLabel = formatRegion(activeRegion);
-      questions.push(`${capM} by Department in ${rLabel}`);
-      questions.push(`${capM} Trend in ${rLabel}`);
-      questions.push(`Compare ${capM} in ${rLabel} and South`);
-      questions.push(`${capM} by Plant in ${rLabel}`);
-      questions.push(`Top 3 Plants by ${capM} in ${rLabel}`);
-    } else if (activePlant) {
-      const pLabel = formatPlant(activePlant);
-      questions.push(`${capM} by Department in ${pLabel}`);
-      questions.push(`${capM} Trend in ${pLabel}`);
-      questions.push(`Compare ${pLabel} and Palo Verde ${capM}`);
-      questions.push(`Top 3 Performing Plants by ${capM}`);
-      questions.push(`${pLabel} ${capM} by Region`);
+    // Detect ID / Contract / Asset / Warehouse query
+    const hasContractId = results[0]?.contract_ref || sqlLower.includes('contract_ref');
+    const hasAssetCode = results[0]?.asset_code || sqlLower.includes('asset_code');
+    const hasWarehouseId = results[0]?.warehouse_id || sqlLower.includes('warehouse_id');
+    const hasProjectId = results[0]?.project_id || sqlLower.includes('project_id');
+    
+    if (hasContractId) {
+      const contractId = results[0]?.contract_ref || "REF-001";
+      const clientName = results[0]?.client_name || "Acme Corp";
+      questions.push(`What is the delivery status of contract ${contractId}?`);
+      questions.push(`Show project cost and completion date for contract ${contractId}`);
+      questions.push(`Total project cost for ${clientName}`);
+      questions.push(`Show all contracts with In Progress delivery status`);
+      questions.push(`Show all contracts with Pending delivery status`);
+    } else if (hasAssetCode) {
+      const assetCode = results[0]?.asset_code || "AST-001";
+      const plantOrFacility = results[0]?.facility_name || results[0]?.plant || "Solar Facility Alpha";
+      questions.push(`What is the vendor and commission date of asset ${assetCode}?`);
+      questions.push(`Show energy output by vendor for ${plantOrFacility}`);
+      questions.push(`Show all assets for vendor SunPower`);
+      questions.push(`Top 3 plants by energy output`);
+      questions.push(`Show all assets commissioned after 2023`);
+    } else if (hasWarehouseId) {
+      const warehouseId = results[0]?.warehouse_id || "WH-001";
+      questions.push(`What is the inventory turnover and stock value for warehouse ${warehouseId}?`);
+      questions.push(`Show stock value by supplier for ${warehouseId}`);
+      questions.push(`Show all warehouses with inventory turnover above 4.0`);
+      questions.push(`Top 3 warehouses by stock value`);
+      questions.push(`Total stock value across all warehouses`);
+    } else if (hasProjectId) {
+      const pid = results[0]?.project_id || "PRJ-DAR-000001";
+      questions.push(`Show all details of project ${pid}`);
+      questions.push(`What is the completion percentage of project ${pid}?`);
+      questions.push(`What is the delay days for project ${pid}?`);
+      questions.push(`Show contractor name and material status for project ${pid}`);
+      questions.push(`Compare project ${pid} with other projects in the same plant`);
     } else {
-      // General fallbacks
-      questions.push(`Compare ${capM} Across Regions`);
-      questions.push(`Show ${capM} Trend`);
-      questions.push(`Top 3 Performing Plants by ${capM}`);
-      questions.push(`Compare ${capM} Across Departments`);
-      questions.push(`Compare ${capM} in 2023 and 2024`);
+      const isTrend = sqlLower.includes('strftime') || metadata?.intent === 'trend' || sqlLower.includes('group by strftime');
+      const isBreakdown = sqlLower.includes('group by') && !isTrend;
+      
+      if (isTrend) {
+        questions.push(`What was the ${cleanM} breakdown by plant ${timeLabel}`.trim());
+        questions.push(`What was the ${cleanM} breakdown by state ${timeLabel}`.trim());
+        questions.push(`What was the ${cleanM} breakdown by project type ${timeLabel}`.trim());
+        questions.push(`Compare ${cleanM} and Budget Used ${timeLabel}`.trim());
+        questions.push(`Show ${cleanM} trend for last 3 years`);
+      } else if (isBreakdown) {
+        const isGroupByPlant = sqlLower.includes('group by plant') || sqlLower.includes('group by comparison_group');
+        const isGroupByState = sqlLower.includes('group by state') || sqlLower.includes('group by location');
+        
+        if (isGroupByPlant) {
+          questions.push(`Show ${cleanM} trend by plant ${timeLabel}`.trim());
+          questions.push(`Compare ${cleanM} of top performing plants`);
+          questions.push(`What was the capacity MW breakdown by plant ${timeLabel}`.trim());
+          questions.push(`What was the budget allocated by plant ${timeLabel}`.trim());
+          questions.push(`Show completion percentage by plant ${timeLabel}`.trim());
+        } else if (isGroupByState) {
+          questions.push(`Show ${cleanM} trend by state ${timeLabel}`.trim());
+          questions.push(`Compare ${cleanM} in Gujarat and Rajasthan ${timeLabel}`.trim());
+          questions.push(`What was the budget allocated by state ${timeLabel}`.trim());
+          questions.push(`Show delay days breakdown by state ${timeLabel}`.trim());
+          questions.push(`Top performing plants in Gujarat`);
+        } else {
+          questions.push(`Show ${cleanM} trend by project type ${timeLabel}`.trim());
+          questions.push(`Compare ${cleanM} of Solar and Wind ${timeLabel}`.trim());
+          questions.push(`What was the completion percentage by project type ${timeLabel}`.trim());
+          questions.push(`What was the delay days breakdown by project type ${timeLabel}`.trim());
+          questions.push(`Compare budget allocated by project type ${timeLabel}`.trim());
+        }
+      } else {
+        if (activeDept && activeRegion) {
+          questions.push(`Compare ${deptLabel} ${cleanM} in ${regionLabel} and South`);
+          questions.push(`Show ${deptLabel} ${cleanM} trend in ${regionLabel} over time`);
+          questions.push(`Compare ${deptLabel} and Digital ${cleanM} in ${regionLabel}`);
+          questions.push(`Show ${deptLabel} ${cleanM} breakdown by plant in ${regionLabel}`);
+          questions.push(`Top performing plants for ${deptLabel} in ${regionLabel}`);
+        } else if (activePlant) {
+          questions.push(`Show ${cleanM} trend for ${plantLabel}`);
+          questions.push(`What was the ${cleanM} breakdown by project type for ${plantLabel}?`);
+          questions.push(`Compare ${plantLabel} and Darlington ${cleanM}`);
+          questions.push(`Show all metrics for ${plantLabel}`);
+          questions.push(`What was the completion percentage for ${plantLabel}?`);
+        } else if (activeRegion) {
+          questions.push(`Show ${cleanM} trend in ${regionLabel}`);
+          questions.push(`What was the ${cleanM} breakdown by project type in ${regionLabel}?`);
+          questions.push(`Compare ${cleanM} in ${regionLabel} and Rajasthan`);
+          questions.push(`Show ${cleanM} breakdown by plant in ${regionLabel}`);
+          questions.push(`Top 3 performing plants in ${regionLabel}`);
+        } else if (activeDept) {
+          questions.push(`Show ${deptLabel} ${cleanM} trend over time`);
+          questions.push(`What was the ${deptLabel} ${cleanM} breakdown by state?`);
+          questions.push(`What was the ${deptLabel} ${cleanM} breakdown by plant?`);
+          questions.push(`Compare ${deptLabel} and Wind ${cleanM}`);
+          questions.push(`Top 3 plants by ${deptLabel} ${cleanM}`);
+        } else {
+          questions.push(`Show ${cleanM} trend over time`);
+          questions.push(`What was the ${cleanM} breakdown by plant ${timeLabel}`.trim());
+          questions.push(`What was the ${cleanM} breakdown by state ${timeLabel}`.trim());
+          questions.push(`What was the ${cleanM} breakdown by project type ${timeLabel}`.trim());
+          questions.push(`Compare ${cleanM} in 2025 and 2026`);
+        }
+      }
     }
     
     return questions.slice(0, 5);
   };
 
+  const formatKPIValue = (val: any, key: string) => {
+    if (val == null) return "0";
+    const k = key.toLowerCase();
+    if (k.includes('capacity')) {
+      return `${val.toLocaleString()} MW`;
+    }
+    if (k.includes('percent') || k.includes('pct')) {
+      return `${val.toLocaleString()}%`;
+    }
+    if (k.includes('delay') || k.includes('days')) {
+      return `${val.toLocaleString()} Days`;
+    }
+    if (k.includes('headcount') || k.includes('count')) {
+      return val.toLocaleString();
+    }
+    // Currency formatting
+    const prefix = "$";
+    if (val >= 1000000) return `${prefix}${(val / 1000000).toFixed(1)}M`;
+    if (val >= 1000) return `${prefix}${(val / 1000).toFixed(1)}K`;
+    return prefix + val.toLocaleString();
+  };
+
   return (
     <div className="p-6 space-y-6">
       {/* 1. Contextual KPIs Bar */}
-      {kpis && (() => {
-        const defaultKeys = ["revenue", "profit", "expenses", "headcount"];
-        const dynamicKey = Object.keys(kpis).find(k => !defaultKeys.includes(k));
-        
-        const fourthKpiName = dynamicKey 
-          ? dynamicKey.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
-          : "Headcount";
-        const fourthKpiVal = dynamicKey ? kpis[dynamicKey] : kpis.headcount;
-        const isFourthCurrency = dynamicKey 
-          ? !['headcount', 'customer_count'].includes(dynamicKey.toLowerCase()) 
-          : false;
-
-        return (
-          <div className="grid grid-cols-4 gap-6">
-            {[
-              { name: "Revenue", val: kpis.revenue, isCurrency: true },
-              { name: "Profit", val: kpis.profit, isCurrency: true },
-              { name: "Expenses", val: kpis.expenses, isCurrency: true },
-              { name: fourthKpiName, val: fourthKpiVal, isCurrency: isFourthCurrency }
-            ].map(item => {
-              const formattedVal = item.isCurrency ? formatKPI(item.val) : formatHeadcount(item.val);
-              return (
-                <div key={item.name} className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800/80 shadow-sm rounded-2xl p-5 flex flex-col justify-between transition-all hover:shadow-md">
-                  <div>
-                    <p className="text-[10px] font-bold text-gray-400 dark:text-slate-500 uppercase tracking-wider mb-2">{item.name}</p>
-                    <p className="text-3xl font-extrabold text-gray-900 dark:text-slate-50 tracking-tight">{formattedVal}</p>
-                  </div>
+      {kpis && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+          {Object.entries(kpis).map(([key, val]) => {
+            const name = key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+            const formattedVal = formatKPIValue(val, key);
+            return (
+              <div key={key} className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800/80 shadow-sm rounded-2xl p-5 flex flex-col justify-between transition-all hover:shadow-md">
+                <div>
+                  <p className="text-[10px] font-bold text-gray-400 dark:text-slate-500 uppercase tracking-wider mb-2">{name}</p>
+                  <p className="text-3xl font-extrabold text-gray-900 dark:text-slate-50 tracking-tight">{formattedVal}</p>
                 </div>
-              );
-            })}
-          </div>
-        );
-      })()}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* 2. Main Visualization */}
       <div className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800/80 shadow-sm rounded-2xl p-6">
@@ -354,25 +471,27 @@ export function ResultsDisplay({ data, devMode, onFollowUpClick, darkMode }: Res
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4">
-            <div className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800/80 shadow-sm rounded-2xl p-6 flex flex-col">
-              <h3 className="text-xs font-bold text-gray-900 dark:text-slate-100 mb-3">Generated SQL</h3>
-              <div className="bg-gray-50 dark:bg-slate-950 border border-gray-100 dark:border-slate-850 rounded-xl p-4 overflow-x-auto max-h-60">
-                <pre className="text-xs leading-relaxed text-gray-800 dark:text-slate-350 font-mono">
-                  {sql_query.split('\n').map((line: string, i: number) => (
-                    <div key={i} className="flex">
-                      <span className="w-6 text-gray-400 dark:text-slate-600 select-none mr-2">{i + 1}</span>
-                      <span dangerouslySetInnerHTML={{
-                        __html: line
-                          .replace(/(SELECT|FROM|WHERE|GROUP BY|ORDER BY|AND|OR|AS|SUM)/g, '<span class="text-blue-600 dark:text-blue-400 font-semibold">$1</span>')
-                          .replace(/('[^']*')/g, '<span class="text-emerald-600 dark:text-emerald-400">$1</span>')
-                      }} />
-                    </div>
-                  ))}
-                </pre>
+          {sql_query && (
+            <div className="grid grid-cols-1 gap-4">
+              <div className="bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800/80 shadow-sm rounded-2xl p-6 flex flex-col">
+                <h3 className="text-xs font-bold text-gray-900 dark:text-slate-100 mb-3">Generated SQL</h3>
+                <div className="bg-gray-50 dark:bg-slate-950 border border-gray-100 dark:border-slate-850 rounded-xl p-4 overflow-x-auto max-h-60">
+                  <pre className="text-xs leading-relaxed text-gray-800 dark:text-slate-350 font-mono">
+                    {sql_query.split('\n').map((line: string, i: number) => (
+                      <div key={i} className="flex">
+                        <span className="w-6 text-gray-400 dark:text-slate-600 select-none mr-2">{i + 1}</span>
+                        <span dangerouslySetInnerHTML={{
+                          __html: line
+                            .replace(/(SELECT|FROM|WHERE|GROUP BY|ORDER BY|AND|OR|AS|SUM)/g, '<span class="text-blue-600 dark:text-blue-400 font-semibold">$1</span>')
+                            .replace(/('[^']*')/g, '<span class="text-emerald-600 dark:text-emerald-400">$1</span>')
+                        }} />
+                      </div>
+                    ))}
+                  </pre>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

@@ -47,14 +47,15 @@ export default function Home() {
   const [recentQueries, setRecentQueries] = useState<{query: string, result: any}[]>([]);
   const [devMode, setDevMode] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+  const [forceLLM, setForceLLM] = useState(false);
 
   // Live KPIs shown in the sidebar as the user types
-  const [liveKpis, setLiveKpis] = useState<{
-    revenue?: number; profit?: number; expenses?: number; headcount?: number;
-  } | null>(null);
+  const [liveKpis, setLiveKpis] = useState<Record<string, number> | null>(null);
   const [liveQuery, setLiveQuery] = useState('');
   const liveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Prevents live-debounce from re-fetching when loading a cached recent result
+  const skipNextLiveQueryRef = useRef(false);
 
   // Load recents from localStorage on mount
   useEffect(() => {
@@ -69,8 +70,8 @@ export default function Home() {
     if (results?.kpis) setLiveKpis(results.kpis);
   }, [results]);
 
-  // Live Search: debounced 150ms after user stops typing
-  // Executes full analysis and updates all dashboard components in real time
+  // Live Search: debounced 800ms — only fires after user genuinely pauses
+  // (avoids firing expensive Ollama calls on every single keystroke)
   const handleLiveTyping = (q: string) => {
     setLiveQuery(q);
     setError(null); // Clear errors immediately as user types
@@ -87,10 +88,16 @@ export default function Home() {
       setLiveKpis(null);
       return;
     }
+
+    // If a recent result was just loaded from cache, skip the full query round-trip
+    if (skipNextLiveQueryRef.current) {
+      skipNextLiveQueryRef.current = false;
+      return;
+    }
     
     liveDebounceRef.current = setTimeout(async () => {
       handleQuery(trimmed);
-    }, 150);
+    }, 800);
   };
 
   const handleQuery = async (query: string) => {
@@ -106,7 +113,11 @@ export default function Home() {
       const response = await fetch('/api/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ raw_query: query, blueprint: null }),
+        body: JSON.stringify({ 
+          raw_query: query, 
+          blueprint: null,
+          force_llm: forceLLM 
+        }),
       });
 
       if (!response.ok) {
@@ -139,6 +150,12 @@ export default function Home() {
   };
 
   const loadRecent = (item: {query: string, result: any}) => {
+    // Immediately display cached result — no HTTP call needed
+    skipNextLiveQueryRef.current = true;
+    if (liveDebounceRef.current) {
+      clearTimeout(liveDebounceRef.current);
+      liveDebounceRef.current = null;
+    }
     setResults(item.result);
     if (item.result?.kpis) setLiveKpis(item.result.kpis);
     setError(null);
@@ -203,6 +220,57 @@ export default function Home() {
               </div>
             </div>
           </header>
+
+          {/* Developer Mode Panel */}
+          {devMode && (
+            <div className="bg-purple-50 dark:bg-purple-950/20 border-b border-purple-200 dark:border-purple-900/30 px-6 py-4 transition-colors duration-200">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-purple-900 dark:text-purple-200 mb-2">Engine Mode</h3>
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        checked={!forceLLM}
+                        onChange={() => setForceLLM(false)}
+                        className="w-4 h-4 text-purple-600"
+                      />
+                      <span className="text-sm text-gray-700 dark:text-slate-300">
+                        <span className="font-semibold">Hybrid</span> (Fast deterministic + LLM fallback)
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        checked={forceLLM}
+                        onChange={() => setForceLLM(true)}
+                        className="w-4 h-4 text-purple-600"
+                      />
+                      <span className="text-sm text-gray-700 dark:text-slate-300">
+                        <span className="font-semibold">LLM-Only</span> (Always use Ollama)
+                      </span>
+                    </label>
+                  </div>
+                </div>
+                {results?.metadata && (
+                  <div className="text-right">
+                    <div className="text-xs text-gray-500 dark:text-slate-400 mb-1">Last Query</div>
+                    <div className="text-sm font-semibold text-purple-900 dark:text-purple-200">
+                      {results.metadata.engine_mode === 'llm_only' && '🤖 LLM Only'}
+                      {results.metadata.engine_mode === 'hybrid_deterministic' && '⚡ Hybrid (Deterministic)'}
+                      {results.metadata.engine_mode === 'hybrid_llm' && '🔀 Hybrid (LLM Fallback)'}
+                      {!results.metadata.engine_mode && (
+                        results.metadata.parsed_deterministically ? '⚡ Hybrid (Deterministic)' : '🔀 Hybrid (LLM)'
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-600 dark:text-slate-400 mt-1">
+                      {Math.round(results.metadata.backend_ms || 0)}ms
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Main Content */}
           <main className="flex-1 flex overflow-hidden">

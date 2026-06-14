@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 
 interface QueryInterfaceProps {
   onSubmit: (query: string) => void;
   isLoading: boolean;
   recentQueries?: {query: string, result: any}[];
   onSelectRecent?: (item: {query: string, result: any}) => void;
-  liveKpis?: { revenue?: number; profit?: number; expenses?: number; headcount?: number } | null;
+  liveKpis?: Record<string, number> | null;
   onQueryChange?: (q: string) => void;
   results?: any;
 }
@@ -32,7 +32,28 @@ const KNOWN_METRICS = [
   'profit',
   'expenses',
   'headcount',
-  'salary'
+  'salary',
+  // schema-level
+  'capacity_mw',
+  'budget_allocated',
+  'budget_used',
+  'budget_remaining',
+  'completion_percentage',
+  'delay_days',
+  'payment_received',
+];
+
+// All completable tokens (metrics + intent words + dimension words)
+// Will be merged with server metadata at runtime
+const STATIC_COMPLETIONS = [
+  ...KNOWN_METRICS.map(m => m.replace(/_/g, ' ')),
+  // intents
+  'trend', 'compare', 'breakdown', 'top', 'highest', 'lowest',
+  // dimensions
+  'by state', 'by plant', 'by project type', 'by contractor', 'by year',
+  'across states', 'across plants',
+  // time
+  '2022', '2023', '2024', '2025', '2026',
 ];
 
 function extractMetrics(sql: string, results: any[]): string[] {
@@ -98,6 +119,10 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [lastSubmitted, setLastSubmitted] = useState('');
   const [isFocused, setIsFocused] = useState(false);
+  // Merged completions list (static + server metadata, capped for perf)
+  const completionsRef = useRef<string[]>(STATIC_COMPLETIONS.slice(0, 80));
+  // Prevents suggest fetch when loading from recent (result already displayed)
+  const skipSuggestRef = useRef(false);
 
   const getFollowUpQuestions = () => {
     if (!results || !results.results) return [];
@@ -108,48 +133,51 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
     
     // Extract active filters from SQL query
     const sqlLower = (results.sql_query || '').toLowerCase();
-    const depts = ["sales", "digital", "marketing", "hr", "engineering", "finance", "support", "operations"];
-    const regions = ["north", "south", "east", "west", "central"];
+    const depts = ["solar", "wind", "hybrid", "hybrid-solar", "hybrid-wind", "sales", "digital", "marketing", "hr"];
+    const regions = ["gujarat", "karnataka", "maharashtra", "rajasthan", "tamil nadu", "north", "south", "east", "west", "central"];
     const plants = ["diablo_canyon", "three_mile_island", "palo_verde", "grand_gulf", "vogtle", "hinkley_point", "kashiwazaki", "darlington"];
     
-    const activeDept = depts.find(d => sqlLower.includes(`'${d}'`));
-    const activeRegion = regions.find(r => sqlLower.includes(`'${r}'`));
+    const activeDept = depts.find(d => sqlLower.includes(`'${d}'`) || sqlLower.includes(`'${d.toLowerCase()}'`));
+    const activeRegion = regions.find(r => sqlLower.includes(`'${r}'`) || sqlLower.includes(`'${r.toLowerCase()}'`));
     const activePlant = plants.find(p => sqlLower.includes(p));
     
     // Format helpers
-    const formatDept = (d: string) => d === "hr" || d === "digital" ? d.toUpperCase() : d.charAt(0).toUpperCase() + d.slice(1);
-    const formatRegion = (r: string) => r.charAt(0).toUpperCase() + r.slice(1);
+    const formatDept = (d: string) => {
+      if (d === "hr" || d === "digital") return d.toUpperCase();
+      return d.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('-');
+    };
+    const formatRegion = (r: string) => r.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     const formatPlant = (p: string) => p.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     
     const questions = [];
     
     if (activeDept) {
       const dLabel = formatDept(activeDept);
-      questions.push(`Compare ${dLabel} and Sales ${capM}`);
+      questions.push(`Compare ${dLabel} and Solar ${capM}`);
       questions.push(`${dLabel} ${capM} Trend`);
-      questions.push(`${dLabel} ${capM} by Region`);
+      questions.push(`${dLabel} ${capM} by State`);
       questions.push(`${dLabel} ${capM} by Plant`);
       questions.push(`Top 3 Plants by ${dLabel} ${capM}`);
     } else if (activeRegion) {
       const rLabel = formatRegion(activeRegion);
-      questions.push(`${capM} by Department in ${rLabel}`);
+      questions.push(`${capM} by Project Type in ${rLabel}`);
       questions.push(`${capM} Trend in ${rLabel}`);
-      questions.push(`Compare ${capM} in ${rLabel} and South`);
+      questions.push(`Compare ${capM} in ${rLabel} and Gujarat`);
       questions.push(`${capM} by Plant in ${rLabel}`);
       questions.push(`Top 3 Plants by ${capM} in ${rLabel}`);
     } else if (activePlant) {
       const pLabel = formatPlant(activePlant);
-      questions.push(`${capM} by Department in ${pLabel}`);
+      questions.push(`${capM} by Project Type in ${pLabel}`);
       questions.push(`${capM} Trend in ${pLabel}`);
       questions.push(`Compare ${pLabel} and Palo Verde ${capM}`);
       questions.push(`Top 3 Performing Plants by ${capM}`);
-      questions.push(`${pLabel} ${capM} by Region`);
+      questions.push(`${pLabel} ${capM} by State`);
     } else {
       // General fallbacks
-      questions.push(`Compare ${capM} Across Regions`);
+      questions.push(`Compare ${capM} Across States`);
       questions.push(`Show ${capM} Trend`);
       questions.push(`Top 3 Performing Plants by ${capM}`);
-      questions.push(`Compare ${capM} Across Departments`);
+      questions.push(`Compare ${capM} Across Project Types`);
       questions.push(`Compare ${capM} in 2023 and 2024`);
     }
     
@@ -168,37 +196,82 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
     tagsRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Load metadata
+  // Merge server metadata into completions list
   useEffect(() => {
     fetch('/api/metadata')
       .then(r => r.json())
       .then(data => {
         if (data.metrics && data.categoricals) {
           setMetrics(data.metrics.map((x: string) => x.replace(/_/g, ' ')));
-          setDepartments(data.categoricals.department || []);
-          setRegions(data.categoricals.region || []);
+          setDepartments(data.categoricals.project_type || data.categoricals.department || []);
+          setRegions(data.categoricals.state || data.categoricals.location || data.categoricals.region || []);
+           // Build full completions list from server data (capped at 80 for perf)
+          const serverMetrics: string[] = (data.metrics || []).map((m: string) => m.replace(/_/g, ' '));
+          const serverCats: string[] = Object.values(data.categoricals as Record<string, string[]>)
+            .flat()
+            .map((v: string) => String(v).toLowerCase())
+            .slice(0, 40); // only take first 40 categoricals
+          completionsRef.current = Array.from(new Set([
+            ...STATIC_COMPLETIONS,
+            ...serverMetrics,
+            ...serverCats,
+          ])).slice(0, 80);
         }
       })
       .catch(() => {});
   }, []);
 
-  // Live suggestions as user types (50ms debounce)
+  // Live suggestions as user types (120ms debounce)
   useEffect(() => {
+    // Skip suggest fetch if this query was loaded from recent cache
+    if (skipSuggestRef.current) {
+      skipSuggestRef.current = false;
+      return;
+    }
+    let cancelled = false;
     const t = setTimeout(async () => {
       try {
         const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
-        if (res.ok) {
+        if (!cancelled && res.ok) {
           const data = await res.json();
-          setCategorizedSuggestions(data.suggestions);
-          setPreview(data.preview);
-          if (isFocused || document.activeElement === inputRef.current) {
-            setShowSuggestions(true);
+          if (!cancelled) {
+            setCategorizedSuggestions(data.suggestions);
+            setPreview(data.preview);
+            if (isFocused || document.activeElement === inputRef.current) {
+              setShowSuggestions(true);
+            }
           }
         }
       } catch {}
-    }, 50);
-    return () => clearTimeout(t);
+    }, 200);
+    return () => { cancelled = true; clearTimeout(t); };
   }, [query, isFocused]);
+
+  // Ghost text: derive from query synchronously — useMemo avoids extra re-render
+  const ghostText = useMemo(() => {
+    if (!query) return '';
+    const lastSpaceIdx = query.lastIndexOf(' ');
+    const lastWord = lastSpaceIdx === -1 ? query : query.slice(lastSpaceIdx + 1);
+    if (lastWord.length < 2) return '';
+    const lw = lastWord.toLowerCase();
+    const match = completionsRef.current.find(
+      c => c.toLowerCase().startsWith(lw) && c.toLowerCase() !== lw
+    );
+    return match ? match.slice(lastWord.length) : '';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+
+  // Accept ghost text on Tab or ArrowRight at end of input
+  const acceptGhost = useCallback(() => {
+    if (!ghostText) return false;
+    const lastSpaceIdx = query.lastIndexOf(' ');
+    const prefix = lastSpaceIdx === -1 ? '' : query.slice(0, lastSpaceIdx + 1);
+    const lastWord = lastSpaceIdx === -1 ? query : query.slice(lastSpaceIdx + 1);
+    const completed = prefix + lastWord + ghostText;
+    setQuery(completed);
+    if (onQueryChange) onQueryChange(completed);
+    return true;
+  }, [ghostText, query, onQueryChange]);
 
   const runQuery = useCallback((q: string) => {
     const trimmed = q.trim();
@@ -238,6 +311,12 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Accept ghost text with Tab or ArrowRight when cursor is at end
+    if ((e.key === 'Tab' || (e.key === 'ArrowRight' && (e.target as HTMLInputElement).selectionStart === query.length)) && ghostText) {
+      e.preventDefault();
+      acceptGhost();
+      return;
+    }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setSelectedIndex(p => (p < flatSuggestions.length - 1 ? p + 1 : p));
@@ -286,8 +365,8 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
 
   return (
     <div>
-      {/* Search input */}
-      <div className="relative mb-3">
+      {/* Search input with ghost text overlay */}
+      <div className="relative mb-3 rounded-2xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-700 focus-within:ring-2 focus-within:ring-blue-500 dark:focus-within:ring-blue-600 focus-within:border-transparent shadow-sm transition-all">
         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
           {isLoading
             ? <svg className="animate-spin h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24">
@@ -299,6 +378,20 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
               </svg>
           }
         </div>
+
+        {/* Ghost text layer — sits exactly behind the input text */}
+        {ghostText && isFocused && (
+          <div
+            aria-hidden="true"
+            className="absolute inset-0 pl-10 pr-4 py-2.5 text-sm font-medium pointer-events-none flex items-center overflow-hidden rounded-2xl"
+          >
+            {/* Invisible spacer matching the typed text */}
+            <span className="invisible whitespace-pre">{query}</span>
+            {/* Visible ghost suffix */}
+            <span className="text-slate-400/60 dark:text-slate-500/70 whitespace-pre select-none">{ghostText}</span>
+          </div>
+        )}
+
         <input
           ref={inputRef}
           type="text"
@@ -312,9 +405,19 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
             setIsFocused(false);
           }}
           onKeyDown={handleKeyDown}
-          placeholder="Ask about your data…"
-          className="w-full pl-10 pr-4 py-2.5 text-sm bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-700 text-slate-850 dark:text-slate-100 placeholder-slate-450 rounded-2xl focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-600 focus:border-transparent transition-all shadow-sm font-medium"
+          placeholder={query ? '' : 'Ask about your data…'}
+          className="w-full pl-10 pr-4 py-2.5 text-sm text-slate-850 dark:text-slate-100 placeholder-slate-450 rounded-2xl focus:outline-none font-medium"
+          style={{ background: 'transparent', position: 'relative', zIndex: 1 }}
         />
+
+        {/* Tab to accept hint */}
+        {ghostText && isFocused && (
+          <div className="absolute right-3 inset-y-0 flex items-center pointer-events-none">
+            <span className="text-[10px] font-semibold text-slate-400/70 dark:text-slate-500/70 bg-slate-100 dark:bg-slate-700/60 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-600/50">
+              Tab
+            </span>
+          </div>
+        )}
 
         {/* Suggestions dropdown */}
         {showSuggestions && flatSuggestions.length > 0 && (
@@ -413,6 +516,7 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
                 key={idx}
                 type="button"
                 onClick={() => {
+                  skipSuggestRef.current = true;
                   setQuery(item.query);
                   setLastSubmitted(item.query);
                   if (onSelectRecent) onSelectRecent(item);
@@ -463,11 +567,11 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
         <div className="space-y-1 mt-4">
           <p className="text-xs font-semibold text-gray-400 dark:text-slate-500 uppercase tracking-wider mb-2">Suggested</p>
           {[
-            'Top Revenue Plants',
+            'Top Capacity Plants',
             'Revenue Trend',
-            'Profit by Region',
-            'Department Performance',
-            'monthly revenue trend',
+            'Budget Allocated by State',
+            'Completion Percentage by Project Type',
+            'Delay Days by Contractor',
           ].map((ex, idx) => (
             <button
               key={idx}
@@ -491,7 +595,7 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
         className="flex flex-col items-center justify-center py-4 mt-6 text-slate-400 dark:text-slate-500 cursor-pointer group hover:text-blue-500 transition-colors animate-pulse border-t border-gray-100 dark:border-slate-800"
       >
         <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 group-hover:text-blue-500 transition-colors">
-          Scroll for Metrics, Departments & Regions
+          Scroll for Metrics, Project Types & Locations
         </span>
         <svg className="w-3.5 h-3.5 mt-0.5 text-slate-400 dark:text-slate-500 group-hover:text-blue-500 transition-colors animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M19 9l-7 7-7-7" />
@@ -501,9 +605,9 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
       {/* Interactive tag chips */}
       <div ref={tagsRef} className="space-y-4 mt-20 pt-8 border-t border-gray-100 dark:border-slate-800">
         {[
-          { title: 'Metrics', items: metrics.length > 0 ? metrics : ['Revenue', 'Profit', 'Expenses', 'Headcount'] },
-          { title: 'Departments', items: departments.length > 0 ? departments : ['Sales', 'Digital', 'Marketing', 'HR'] },
-          { title: 'Regions', items: regions.length > 0 ? regions : ['North', 'South', 'East', 'West', 'Central'] },
+          { title: 'Metrics', items: metrics.length > 0 ? metrics : ['Revenue', 'Capacity MW', 'Budget Allocated', 'Budget Used', 'Budget Remaining', 'Completion %', 'Delay Days'] },
+          { title: 'Project Types', items: departments.length > 0 ? departments : ['Solar', 'Wind', 'Hybrid', 'Hybrid-Solar', 'Hybrid-Wind'] },
+          { title: 'Locations', items: regions.length > 0 ? regions : ['Gujarat', 'Karnataka', 'Maharashtra', 'Rajasthan', 'Tamil Nadu'] },
         ].map(({ title, items }) => (
           <div key={title}>
             <h3 className="text-[10px] font-bold text-gray-400 dark:text-slate-500 uppercase tracking-wider mb-2">{title}</h3>

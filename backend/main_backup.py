@@ -681,7 +681,6 @@ class Blueprint(BaseModel):
 class QueryBlueprintPayload(BaseModel):
     raw_query: str
     blueprint: Optional[Blueprint] = None
-    force_llm: bool = False  # New: Force LLM-only mode
     force_llm: bool = False
     parsing_metadata: Optional[Dict[str, Any]] = None
 
@@ -829,16 +828,14 @@ def extract_query_components(q: str):
                 if d.capitalize() not in detected_depts:
                     detected_depts.append(d.capitalize())
             
-    # 3. Detect regions/locations/states (using SemanticSchemaAdapter)
+    # 3. Detect regions/locations (using SemanticSchemaAdapter)
     detected_regions = []
     locations = adapter.get_dimension_values("location")
-    states = adapter.get_dimension_values("state")
-    for val in list(locations) + list(states):
+    for val in locations:
         val_str = str(val).lower()
         val_clean = val_str.replace('_', ' ')
         if val_str in q_lower or val_clean in q_lower:
-            if str(val) not in detected_regions:
-                detected_regions.append(str(val))
+            detected_regions.append(str(val))
     # Fallback to legacy regions
     all_regions = ["north", "south", "east", "west", "central"]
     for r in all_regions:
@@ -2918,9 +2915,7 @@ async def handle_query(payload: QueryBlueprintPayload):
         "parsed_deterministically": parsed_deterministically,
         "parser_confidence": parser_confidence,
         "intent": intent,
-        "sources": execution_data.get("plants_queried", len(POWER_PLANTS)),
-        "engine_mode": "llm_only" if payload.force_llm else ("hybrid_deterministic" if parsed_deterministically else "hybrid_llm"),
-        "force_llm": payload.force_llm
+        "sources": execution_data.get("plants_queried", len(POWER_PLANTS))
     }
     return execution_data
 
