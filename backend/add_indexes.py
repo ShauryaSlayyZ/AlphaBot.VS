@@ -18,20 +18,33 @@ def add_indexes_to_db(db_path):
         
         table_name = row[0]
         
-        # Create indexes
+        # Create indexes for physical columns in the schema
         print(f"  Creating indexes on {table_name}...")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_department ON {table_name}(department)")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_region ON {table_name}(region)")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_record_date ON {table_name}(record_date)")
         
-        # Also create composite and expression indexes for optimal search performance
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_dept_region ON {table_name}(department, region)")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_dept_date ON {table_name}(department, record_date)")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_region_date ON {table_name}(region, record_date)")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_expr_year ON {table_name}(strftime('%Y', record_date))")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_expr_month ON {table_name}(strftime('%Y-%m', record_date))")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_expr_date ON {table_name}(DATE(record_date))")
+        # Check if new schema columns exist before creating indexes
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        cols = [r[1] for r in cursor.fetchall()]
         
+        if "state" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_state ON {table_name}(state)")
+        if "fy_year" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_fy_year ON {table_name}(fy_year)")
+        if "project_type" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_project_type ON {table_name}(project_type)")
+        if "location" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_location ON {table_name}(location)")
+            
+        # Composite indexes for subset query combinations
+        if "state" in cols and "fy_year" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_state_fy ON {table_name}(state, fy_year)")
+        if "state" in cols and "project_type" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_state_proj ON {table_name}(state, project_type)")
+        if "fy_year" in cols and "project_type" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_fy_proj ON {table_name}(fy_year, project_type)")
+        if "state" in cols and "fy_year" in cols and "project_type" in cols:
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_state_fy_proj ON {table_name}(state, fy_year, project_type)")
+            
         conn.commit()
         print(f"  Success!")
     except Exception as e:

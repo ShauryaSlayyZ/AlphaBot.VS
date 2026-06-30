@@ -12,6 +12,7 @@ import {
   Title,
   Tooltip,
   Legend,
+  Filler,
 } from 'chart.js';
 import { Bar, Line, Doughnut } from 'react-chartjs-2';
 
@@ -24,7 +25,8 @@ ChartJS.register(
   ArcElement,
   Title,
   Tooltip,
-  Legend
+  Legend,
+  Filler
 );
 
 const formatLabel = (label: any): string => {
@@ -56,6 +58,39 @@ const formatLabel = (label: any): string => {
   }
 
   return str;
+};
+
+const formatSingleValue = (val: number, metricName: string, unit: string) => {
+  const mLower = metricName.toLowerCase();
+  
+  const isCurrency = 
+    ['revenue', 'budget', 'cost', 'profit', 'spend', 'expense', 'salary', 'tax', 'payment'].some(k => mLower.includes(k)) ||
+    ['usd', 'inr'].includes(unit.toLowerCase());
+
+  if (isCurrency) {
+    const prefix = "₹"; // Indian context for plants in Gujarat, Rajasthan etc.
+    if (val >= 1000000) return `${prefix}${(val / 1000000).toFixed(1)}M`;
+    if (val >= 1000) return `${prefix}${(val / 1000).toFixed(1)}K`;
+    return `${prefix}${val.toLocaleString()}`;
+  }
+
+  if (mLower.includes('capacity') || mLower.includes('mw') || unit === 'MW') {
+    return `${val.toLocaleString()} MW`;
+  }
+  
+  if (mLower.includes('percent') || mLower.includes('pct') || unit === 'PERCENT') {
+    return `${val.toLocaleString()}%`;
+  }
+  
+  if (mLower.includes('delay') || mLower.includes('days') || unit === 'DAYS') {
+    return `${val.toLocaleString()} Days`;
+  }
+  
+  if (unit && unit !== 'RawData' && unit !== 'Units') {
+    return `${val.toLocaleString()} ${unit}`;
+  }
+  
+  return val.toLocaleString();
 };
 
 /** Determine the single best chart type for a given result set */
@@ -134,14 +169,20 @@ export function DataChart({ results, unit, darkMode }: DataChartProps) {
   // ── Single scalar value ──────────────────────────────────────────────────
   if (results.length === 1 && numericKeys.length === 1) {
     const value = firstRow[numericKeys[0]];
-    const metricName = numericKeys[0].replace(/_/g, ' ').toUpperCase();
+    const rawMetric = numericKeys[0];
+    const metricName = rawMetric.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    const labelVal = labelKey ? firstRow[labelKey] : null;
+    const formattedLabel = labelVal ? formatLabel(labelVal) : "";
+    const displayValue = formatSingleValue(value, rawMetric, unit);
+    
     return (
-      <div className="flex flex-col items-center justify-center py-8">
-        <div className="text-5xl font-bold text-gray-900 dark:text-slate-100 mb-2">
-          {value.toLocaleString()}
+      <div className="flex flex-col items-center justify-center py-12 text-center w-full">
+        <div className="text-6xl font-extrabold text-slate-900 dark:text-slate-50 tracking-tight mb-4 animate-fade-in">
+          {displayValue}
         </div>
-        <div className="text-sm text-gray-500 dark:text-slate-400">{unit}</div>
-        <div className="text-xs text-gray-400 dark:text-slate-500 mt-1">{metricName}</div>
+        <div className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest bg-slate-100 dark:bg-slate-800/80 px-3.5 py-1.5 rounded-full border border-slate-200/50 dark:border-slate-700/50 shadow-sm">
+          {metricName}{formattedLabel ? ` • ${formattedLabel}` : ""}
+        </div>
       </div>
     );
   }
@@ -205,7 +246,8 @@ export function DataChart({ results, unit, darkMode }: DataChartProps) {
   const gridColor = isDark ? 'rgba(51, 65, 85, 0.35)' : 'rgba(226, 232, 240, 0.8)';
   const legendColor = isDark ? 'rgba(241, 245, 249, 0.9)' : 'rgba(15, 23, 42, 0.9)';
 
-  const scales = {
+  // Dynamic scale assignment (Dual Y-Axis and logarithmic checks)
+  let dynamicScales: any = {
     x: {
       grid: { color: gridColor },
       ticks: {
@@ -221,6 +263,113 @@ export function DataChart({ results, unit, darkMode }: DataChartProps) {
       }
     }
   };
+
+  let dualAxisConfig: { enabled: boolean; largerKey?: string; smallerKey?: string } = { enabled: false };
+  let logScaleEnabled = false;
+
+  if (displayResults.length > 1) {
+    if (finalNumericKeys.length === 2) {
+      const [keyA, keyB] = finalNumericKeys;
+      let maxA = 0;
+      let maxB = 0;
+      displayResults.forEach(r => {
+        const valA = Math.abs(r[keyA] || 0);
+        const valB = Math.abs(r[keyB] || 0);
+        if (valA > maxA) maxA = valA;
+        if (valB > maxB) maxB = valB;
+      });
+      if (maxA > 0 && maxB > 0) {
+        const larger = Math.max(maxA, maxB);
+        const smaller = Math.min(maxA, maxB);
+        if (larger / smaller > 50) {
+          dualAxisConfig = {
+            enabled: true,
+            largerKey: maxA > maxB ? keyA : keyB,
+            smallerKey: maxA > maxB ? keyB : keyA
+          };
+          
+          const labelLarger = (dualAxisConfig.largerKey || '').replace(/_/g, ' ').toUpperCase();
+          const labelSmaller = (dualAxisConfig.smallerKey || '').replace(/_/g, ' ').toUpperCase();
+
+          dynamicScales = {
+            x: {
+              grid: { color: gridColor },
+              ticks: {
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 500, size: 10 }
+              }
+            },
+            y: {
+              type: 'linear' as const,
+              display: true,
+              position: 'left' as const,
+              grid: { color: gridColor },
+              ticks: {
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 500, size: 10 }
+              },
+              title: {
+                display: true,
+                text: labelLarger,
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 600, size: 10 }
+              }
+            },
+            y1: {
+              type: 'linear' as const,
+              display: true,
+              position: 'right' as const,
+              grid: { drawOnChartArea: false },
+              ticks: {
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 500, size: 10 }
+              },
+              title: {
+                display: true,
+                text: labelSmaller,
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 600, size: 10 }
+              }
+            }
+          };
+        }
+      }
+    } else if (finalNumericKeys.length === 1) {
+      let maxVal = -Infinity;
+      let minVal = Infinity;
+      displayResults.forEach(r => {
+        const val = r[finalNumericKeys[0]];
+        if (typeof val === 'number') {
+          if (val > maxVal) maxVal = val;
+          if (val > 0 && val < minVal) minVal = val;
+        }
+      });
+      if (maxVal > 0 && minVal < Infinity && minVal > 0) {
+        if (maxVal / minVal > 1000) {
+          logScaleEnabled = true;
+          dynamicScales = {
+            x: {
+              grid: { color: gridColor },
+              ticks: {
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 500, size: 10 }
+              }
+            },
+            y: {
+              type: 'logarithmic' as const,
+              grid: { color: gridColor },
+              ticks: {
+                color: textColor,
+                font: { family: 'Inter, system-ui, sans-serif', weight: 500, size: 10 }
+              }
+            }
+          };
+        }
+      }
+    }
+  }
+
+  const scales = dynamicScales;
 
   // ── Time-agg toggle (only shown when data has detailed dates or is a multi-year comparison) ────────────
   const showAggToggle = isTimeSeries && labelKey && (String(firstRow[labelKey]).length > 4 || isMultiYearComparison);
@@ -377,6 +526,7 @@ export function DataChart({ results, unit, darkMode }: DataChartProps) {
         tension: 0.35,
         pointRadius: isLine ? 4 : undefined,
         pointHoverRadius: isLine ? 6 : undefined,
+        ...(dualAxisConfig.enabled ? { yAxisID: metric === dualAxisConfig.largerKey ? 'y' : 'y1' } : {}),
       };
     });
 

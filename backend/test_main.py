@@ -450,5 +450,182 @@ def test_schema_generalization(tmp_path, monkeypatch):
     main.MetadataRegistry.get_instance().initialize()
 
 
+# --- New Tests for Merged Enterprise Features ---
+
+def test_connection_manager_dictionary_and_list_format(tmp_path, monkeypatch):
+    import json
+    from main import ConnectionManager, BASE_DIR
+    
+    # 1. Dictionary format config
+    config_dict = {
+        "databases": {
+            "test_db_1": "sqlite:///test_db_1.db",
+            "test_db_2": "sqlite:///test_db_2.db"
+        },
+        "ignore": ["test_db_2"]
+    }
+    
+    config_path = tmp_path / "connections.json"
+    with open(config_path, "w") as f:
+        json.dump(config_dict, f)
+        
+    monkeypatch.setattr("main.BASE_DIR", str(tmp_path))
+    
+    # Load and verify ignore lists
+    keys = ConnectionManager.load()
+    assert "test_db_1" in keys
+    assert "test_db_2" not in keys
+    assert "test_db_1.db" in str(ConnectionManager.engine("test_db_1").url)
+    
+    # Path resolution
+    assert ConnectionManager.db_path("test_db_1").endswith("test_db_1.db")
+    
+    # 2. List format config
+    config_list = {
+        "databases": [
+            {"name": "test_db_3", "url": "sqlite:///test_db_3.db"},
+            {"name": "test_db_4", "url": "sqlite:///test_db_4.db"}
+        ],
+        "ignore": ["test_db_4"]
+    }
+    
+    with open(config_path, "w") as f:
+        json.dump(config_list, f)
+        
+    keys = ConnectionManager.load()
+    assert "test_db_3" in keys
+    assert "test_db_4" not in keys
+    assert "test_db_3.db" in str(ConnectionManager.engine("test_db_3").url)
+
+
+def test_metadata_cache_loading_and_invalidation(tmp_path, monkeypatch):
+    import json
+    import time
+    from main import ConnectionManager, MetadataRegistry, SchemaProfile
+    
+    # Create fake DB directory
+    db_dir = tmp_path / "dbs"
+    db_dir.mkdir()
+    
+    # Configure connections.json
+    config_dict = {
+        "databases": {
+            "cached_plant": "sqlite:///cached_plant.db"
+        }
+    }
+    config_path = db_dir / "connections.json"
+    with open(config_path, "w") as f:
+        json.dump(config_dict, f)
+        
+    monkeypatch.setattr("main.BASE_DIR", str(db_dir))
+    monkeypatch.setenv("ALPHABOT_DB_DIR", str(db_dir))
+    
+    # Create the fake database with schema
+    import sqlite3
+    db_path = db_dir / "cached_plant.db"
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE metrics_cached_plant (
+        project_id TEXT PRIMARY KEY,
+        location TEXT,
+        revenue REAL,
+        record_date TEXT,
+        fy_year INTEGER
+    )
+    """)
+    cursor.execute("INSERT INTO metrics_cached_plant VALUES ('PRJ-001', 'Mumbai', 500.0, '2025-06-01', 2025)")
+    conn.commit()
+    conn.close()
+    
+    ConnectionManager.load()
+    
+    # Clear cache and run first initialization (populates cache file)
+    cache_path = db_dir / "metadata_cache.json"
+    try:
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+    except OSError:
+        pass
+        
+    registry = MetadataRegistry.get_instance()
+    registry._initialized = False
+    registry.initialize()
+    
+    assert os.path.exists(cache_path)
+    
+    # Modify cache file to verify cache hit loading
+    with open(cache_path, "r") as f:
+        cache_content = json.load(f)
+        
+    # Inject mock metric in cached profile to verify it is loaded from cache
+    cache_content["databases"]["cached_plant"]["profile"]["columns"]["mock_metric"] = {
+        "classification": "METRIC",
+        "data_type": "REAL",
+        "canonical_concept": None,
+        "aliases": ["mock_metric"],
+        "cardinality": 1,
+        "cardinality_ratio": 1.0,
+        "sample_values": [123.4],
+        "unit": "USD",
+        "aggregation_default": "SUM"
+    }
+    
+    with open(cache_path, "w") as f:
+        json.dump(cache_content, f)
+        
+    # Re-initialize registry and ensure it reads the cache without querying DB
+    registry._initialized = False
+    registry.initialize()
+    
+    assert "mock_metric" in registry.metrics
+    
+    # Invalidate cache by changing DB timestamp
+    # Update DB file mtime
+    os.utime(db_path, (time.time() + 10, time.time() + 10))
+    
+    # Re-initialize registry and ensure mock_metric is gone (cache miss / rebuild)
+    registry._initialized = False
+    registry.initialize()
+    
+    assert "mock_metric" not in registry.metrics
+    assert "revenue" in registry.metrics
+
+
+@pytest.mark.asyncio
+async def test_zero_trust_entity_guard_blocks_and_recovers():
+    from main import Blueprint, federated_query_processor, MetadataRegistry
+    
+    registry = MetadataRegistry.get_instance()
+    # Ensure Darlington, Gujarat and state are set up in registry categoricals for recovery checks
+    registry.categoricals["plant"] = {"values": ["darlington", "diablo_canyon"]}
+    registry.categoricals["state"] = {"values": ["Gujarat", "Rajasthan"]}
+    registry.metrics["revenue"] = {"column": "revenue", "type": "NUMERIC"}
+    
+    # Test case 1: Query with unrecognized/hallucinated entity (gibberish)
+    bp = Blueprint(metrics=["revenue"])
+    response = await federated_query_processor(bp, "what is revenue for xyzabcunknown")
+    assert response["status"] == "clarification_required"
+    assert "unrecognized entities: xyzabcunknown" in response["message"]
+    # Verify suggestions list is returned
+    assert "suggestions" in response
+    
+    # Test case 2: Site/Plant direct recovery match (substring match)
+    bp2 = Blueprint(metrics=["revenue"], filters=[])
+    # "darlingt" should recover to plant Darlington
+    response2 = await federated_query_processor(bp2, "what is revenue for darlingt")
+    # Recovered plant should be added to filters
+    assert any(f["column"] == "plant" and f["value"] == "darlington" for f in bp2.filters)
+    
+    # Test case 3: Levenshtein fuzzy recovery (distance <= 2)
+    bp3 = Blueprint(metrics=["revenue"], filters=[])
+    # "Rajasthn" is distance 1 from "Rajasthan"
+    response3 = await federated_query_processor(bp3, "what is revenue for Rajasthn")
+    # Recovered state should be added to filters
+    assert any(f["column"] == "state" and f["value"] == "Rajasthan" for f in bp3.filters)
+
+
+
+
 
 

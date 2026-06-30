@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# SQLite databases (too large for GitHub, keep local only)
+*.db
+
+# Scratch / temporary files
+scratch/
+backend/scratch/
+newbackend/**/scratch/
+
+# Node / Next.js
+node_modules/
+.next/
+frontend/.next/
+frontend/node_modules/
+.npm
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime files
+*.db-shm
+*.db-wal
+connections.json
+metadata_cache.json
+sessions.db
+backend/sessions.db
+backend/test_climbing_debug_sessions.db
+runtime_validation_report.md

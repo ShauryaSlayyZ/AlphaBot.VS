@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import type { ConversationContext } from '@/lib/session';
 
 interface QueryInterfaceProps {
   onSubmit: (query: string) => void;
@@ -8,6 +9,13 @@ interface QueryInterfaceProps {
   liveKpis?: Record<string, number> | null;
   onQueryChange?: (q: string) => void;
   results?: any;
+  conversationContext?: ConversationContext | null;
+  onClearSession?: () => void;
+  queryOverride?: string | null;
+  onClearOverride?: () => void;
+  metadataMetrics: string[];
+  metadataDepts: string[];
+  metadataRegions: string[];
 }
 
 interface CategorizedSuggestions {
@@ -109,7 +117,7 @@ function extractMetrics(sql: string, results: any[]): string[] {
   return ['revenue'];
 }
 
-export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRecent, liveKpis, onQueryChange, results }: QueryInterfaceProps) {
+export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRecent, liveKpis, onQueryChange, results, conversationContext, onClearSession, queryOverride, onClearOverride, metadataMetrics, metadataDepts, metadataRegions }: QueryInterfaceProps) {
   const [query, setQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [categorizedSuggestions, setCategorizedSuggestions] = useState<CategorizedSuggestions>({
@@ -125,32 +133,64 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
   const skipSuggestRef = useRef(false);
 
   const getFollowUpQuestions = () => {
+    // Priority 1: use server-side conversation context (accurate, cross-refresh)
+    if (conversationContext?.active_metric) {
+      const ctx = conversationContext;
+      const metric = ctx.active_metric!;
+      const capM = metric.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const entities = ctx.comparison_entities || [];
+      const locFilters = (ctx.active_filters || []).filter(f =>
+        ['state', 'location', 'region'].includes(f.column)
+      );
+      const locVal = locFilters.length > 0 ? locFilters[0].value : null;
+      const year = ctx.active_timeframe?.value || null;
+      const questions: string[] = [];
+
+      if (entities.length >= 2) {
+        questions.push(`Compare both`);
+        questions.push(`Compare ${capM} in ${entities[0]} and ${entities[1]}`);
+        if (year) questions.push(`Same for ${parseInt(year) + 1 <= 2026 ? parseInt(year) + 1 : parseInt(year) - 1}`);
+        questions.push(`${capM} Trend in ${entities[0]}`);
+        questions.push(`Compare ${capM} Across Project Types`);
+      } else if (locVal) {
+        questions.push(`What about ${locVal === 'Gujarat' ? 'Rajasthan' : 'Gujarat'}?`);
+        if (year) questions.push(`Same for ${parseInt(year) + 1 <= 2026 ? parseInt(year) + 1 : parseInt(year) - 1}`);
+        questions.push(`${capM} Trend in ${locVal}`);
+        questions.push(`${capM} by Project Type in ${locVal}`);
+        questions.push(`Compare ${capM} Across States`);
+      } else {
+        questions.push(`Compare ${capM} Across States`);
+        if (year) questions.push(`Same for ${parseInt(year) + 1 <= 2026 ? parseInt(year) + 1 : parseInt(year) - 1}`);
+        questions.push(`Show ${capM} Trend`);
+        questions.push(`Top 3 Performing Plants by ${capM}`);
+        questions.push(`Compare ${capM} Across Project Types`);
+      }
+      // Always offer a metric switch
+      const altMetric = metric === 'revenue' ? 'budget_allocated' : 'revenue';
+      questions.push(`Show ${altMetric.replace(/_/g, ' ')} instead`);
+      return questions.slice(0, 5);
+    }
+
+    // Fallback: derive from SQL (legacy path, no session context)
     if (!results || !results.results) return [];
     const detectedMetrics = extractMetrics(results.sql_query, results.results);
-    const m = detectedMetrics[0] || "revenue";
+    const m = detectedMetrics[0] || 'revenue';
     const cleanM = m.replace(/_/g, ' ');
     const capM = cleanM.charAt(0).toUpperCase() + cleanM.slice(1);
-    
-    // Extract active filters from SQL query
     const sqlLower = (results.sql_query || '').toLowerCase();
-    const depts = ["solar", "wind", "hybrid", "hybrid-solar", "hybrid-wind", "sales", "digital", "marketing", "hr"];
-    const regions = ["gujarat", "karnataka", "maharashtra", "rajasthan", "tamil nadu", "north", "south", "east", "west", "central"];
-    const plants = ["diablo_canyon", "three_mile_island", "palo_verde", "grand_gulf", "vogtle", "hinkley_point", "kashiwazaki", "darlington"];
-    
+    const depts = ['solar', 'wind', 'hybrid', 'hybrid-solar', 'hybrid-wind', 'sales', 'digital', 'marketing', 'hr'];
+    const regions = ['gujarat', 'karnataka', 'maharashtra', 'rajasthan', 'tamil nadu', 'north', 'south', 'east', 'west', 'central'];
+    const plants = ['diablo_canyon', 'three_mile_island', 'palo_verde', 'grand_gulf', 'vogtle', 'hinkley_point', 'kashiwazaki', 'darlington'];
     const activeDept = depts.find(d => sqlLower.includes(`'${d}'`) || sqlLower.includes(`'${d.toLowerCase()}'`));
     const activeRegion = regions.find(r => sqlLower.includes(`'${r}'`) || sqlLower.includes(`'${r.toLowerCase()}'`));
     const activePlant = plants.find(p => sqlLower.includes(p));
-    
-    // Format helpers
     const formatDept = (d: string) => {
-      if (d === "hr" || d === "digital") return d.toUpperCase();
+      if (d === 'hr' || d === 'digital') return d.toUpperCase();
       return d.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('-');
     };
     const formatRegion = (r: string) => r.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     const formatPlant = (p: string) => p.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-    
-    const questions = [];
-    
+    const questions: string[] = [];
     if (activeDept) {
       const dLabel = formatDept(activeDept);
       questions.push(`Compare ${dLabel} and Solar ${capM}`);
@@ -173,20 +213,18 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
       questions.push(`Top 3 Performing Plants by ${capM}`);
       questions.push(`${pLabel} ${capM} by State`);
     } else {
-      // General fallbacks
       questions.push(`Compare ${capM} Across States`);
       questions.push(`Show ${capM} Trend`);
       questions.push(`Top 3 Performing Plants by ${capM}`);
       questions.push(`Compare ${capM} Across Project Types`);
       questions.push(`Compare ${capM} in 2023 and 2024`);
     }
-    
     return questions.slice(0, 5);
   };
 
-  const [metrics, setMetrics] = useState<string[]>([]);
-  const [departments, setDepartments] = useState<string[]>([]);
-  const [regions, setRegions] = useState<string[]>([]);
+  const metrics = metadataMetrics.map((x: string) => x.replace(/_/g, ' '));
+  const departments = metadataDepts;
+  const regions = metadataRegions;
 
   const inputRef = useRef<HTMLInputElement>(null);
   const suggestionListRef = useRef<HTMLDivElement>(null);
@@ -196,30 +234,34 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
     tagsRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Merge server metadata into completions list
+  // Synchronize queryOverride prop to local query state
   useEffect(() => {
-    fetch('/api/metadata')
-      .then(r => r.json())
-      .then(data => {
-        if (data.metrics && data.categoricals) {
-          setMetrics(data.metrics.map((x: string) => x.replace(/_/g, ' ')));
-          setDepartments(data.categoricals.project_type || data.categoricals.department || []);
-          setRegions(data.categoricals.state || data.categoricals.location || data.categoricals.region || []);
-           // Build full completions list from server data (capped at 80 for perf)
-          const serverMetrics: string[] = (data.metrics || []).map((m: string) => m.replace(/_/g, ' '));
-          const serverCats: string[] = Object.values(data.categoricals as Record<string, string[]>)
-            .flat()
-            .map((v: string) => String(v).toLowerCase())
-            .slice(0, 40); // only take first 40 categoricals
-          completionsRef.current = Array.from(new Set([
-            ...STATIC_COMPLETIONS,
-            ...serverMetrics,
-            ...serverCats,
-          ])).slice(0, 80);
-        }
-      })
-      .catch(() => {});
-  }, []);
+    if (queryOverride !== undefined && queryOverride !== null) {
+      setQuery(queryOverride);
+      setSelectedIndex(-1);
+      // Reset dedup guard so the overridden query always executes
+      setLastSubmitted('');
+      if (onClearOverride) {
+        onClearOverride();
+      }
+    }
+  }, [queryOverride, onClearOverride]);
+
+  // Synchronize metadata props to completions list
+  useEffect(() => {
+    if (metadataMetrics.length > 0) {
+      const serverMetrics = metadataMetrics.map((m: string) => m.replace(/_/g, ' '));
+      const serverCats = [...metadataDepts, ...metadataRegions]
+        .map((v: string) => String(v).toLowerCase())
+        .slice(0, 40);
+      
+      completionsRef.current = Array.from(new Set([
+        ...STATIC_COMPLETIONS,
+        ...serverMetrics,
+        ...serverCats,
+      ])).slice(0, 80);
+    }
+  }, [metadataMetrics, metadataDepts, metadataRegions]);
 
   // Live suggestions as user types (120ms debounce)
   useEffect(() => {
@@ -275,11 +317,11 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
 
   const runQuery = useCallback((q: string) => {
     const trimmed = q.trim();
-    if (!trimmed || trimmed === lastSubmitted || isLoading) return;
+    if (!trimmed || isLoading) return;
     setLastSubmitted(trimmed);
     setShowSuggestions(false);
     onSubmit(trimmed);
-  }, [lastSubmitted, isLoading, onSubmit]);
+  }, [isLoading, onSubmit]);
 
   const handleTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -341,6 +383,7 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
   const handleSuggestionClick = (s: string) => {
     setQuery(s);
     setSelectedIndex(-1);
+    if (onQueryChange) onQueryChange(s);
     runQuery(s);
   };
 
@@ -365,6 +408,41 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
 
   return (
     <div>
+      {/* Conversation Context Pill — shown when session has active state */}
+      {conversationContext?.active_metric && (
+        <div className="mb-3 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] font-bold text-indigo-500 dark:text-indigo-400 uppercase tracking-widest mr-0.5">Context</span>
+          {/* Active metric */}
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
+            <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20"><path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zm6-4a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zm6-3a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z"/></svg>
+            {conversationContext.active_metric.replace(/_/g, ' ')}
+          </span>
+          {/* Active location filters */}
+          {(conversationContext.active_filters || []).filter(f => ['state','location','region'].includes(f.column)).map((f, idx) => (
+            <span key={`${f.column}-${f.value}-${idx}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+              <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd"/></svg>
+              {f.value}
+            </span>
+          ))}
+          {/* Active timeframe */}
+          {conversationContext.active_timeframe?.value && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+              <svg className="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd"/></svg>
+              {conversationContext.active_timeframe.value}
+            </span>
+          )}
+          {/* Clear session button */}
+          <button
+            onClick={onClearSession}
+            title="Clear conversation context"
+            className="ml-auto flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-gray-400 dark:text-slate-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 border border-transparent hover:border-red-200 dark:hover:border-red-900 transition-all"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* Search input with ghost text overlay */}
       <div className="relative mb-3 rounded-2xl bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-700 focus-within:ring-2 focus-within:ring-blue-500 dark:focus-within:ring-blue-600 focus-within:border-transparent shadow-sm transition-all">
         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
@@ -547,6 +625,7 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
                 onClick={() => {
                   setQuery(q);
                   setSelectedIndex(-1);
+                  if (onQueryChange) onQueryChange(q);
                   runQuery(q);
                 }}
                 disabled={isLoading}
@@ -576,7 +655,7 @@ export function QueryInterface({ onSubmit, isLoading, recentQueries, onSelectRec
             <button
               key={idx}
               type="button"
-              onMouseDown={e => { e.preventDefault(); setQuery(ex); runQuery(ex); }}
+              onMouseDown={e => { e.preventDefault(); setQuery(ex); if (onQueryChange) onQueryChange(ex); runQuery(ex); }}
               disabled={isLoading}
               className="w-full text-left px-3 py-2.5 bg-gray-50 dark:bg-slate-850/60 hover:bg-blue-50 dark:hover:bg-blue-950/20 border border-gray-100 dark:border-slate-800 hover:border-blue-200 dark:hover:border-blue-900 rounded-xl text-xs font-semibold text-gray-700 dark:text-slate-300 hover:text-blue-700 dark:hover:text-blue-400 transition-all flex items-center justify-between group"
             >
